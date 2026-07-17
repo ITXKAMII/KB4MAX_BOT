@@ -4,8 +4,8 @@ from flask import Flask, request, jsonify
 import threading
 import time
 
-# ⚙️ Aap ki personal configurations
-BOT_TOKEN = "8541203020:AAFYHBm7u0JpXVye4LiZPDj_1jrIJIRn6jU"      
+# ⚙️ Aap ki personal configurations (Naya Token Updated)
+BOT_TOKEN = "8810988814:AAHO3XR7oXC7MaW2EzClTc_AVwSDnEowKS8"      
 ADMIN_ID = 8722819202                      
 CHANNEL_ID = -1004491994880                
 CHANNEL_LINK = "https://t.me/+vTlm7id5gIw4MGZk" 
@@ -122,7 +122,6 @@ def add_stock_command(message):
         return
     
     try:
-        # Format: /addstock WhatsApp Pakistan +923001234567
         parts = message.text.split(maxsplit=3)
         if len(parts) < 4:
             bot.reply_to(message, "💡 **Format:** `/addstock <Service> <Country> <Number>`\nExample: `/addstock WhatsApp Pakistan +923001234567`", parse_mode="Markdown")
@@ -197,4 +196,4 @@ if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     threading.Thread(target=clean_expired_locks, daemon=True).start()
     print("KB4MAX Safe Admin Bot started...")
-    bot.infinity_polling()
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
