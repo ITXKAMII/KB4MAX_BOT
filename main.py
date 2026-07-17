@@ -4,17 +4,20 @@ from flask import Flask, request, jsonify
 import threading
 import time
 
-BOT_TOKEN = "8541203020:AAFYHBm7u0JpXVye4LiZPDj_1jrIJIRn6jU"  # ⚠️ Apna Bot Token yahan dalein
-ADMIN_ID = 8722819202                # ⚠️ Apni Telegram User ID yahan dalein
-CHANNEL_ID = -1004491994880            # ⚠️ Apne Channel ki ID yahan dalein
+# ⚠️ Yahan apni details dalein
+BOT_TOKEN = "8541203020:AAFYHBm7u0JpXVye4LiZPDj_1jrIJIRn6jU"      # Apna Telegram Bot Token yahan dalein
+ADMIN_ID = 8722819202                      # Apni Telegram User ID yahan dalein
+CHANNEL_ID = -1004491994880                # Apne Telegram Channel ki ID yahan dalein
+CHANNEL_LINK = "https://t.me/your_channel_username" # Apne OTP Channel ka link yahan dalein
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# System Data Storage
-# Format: {"WhatsApp": {"Pakistan": ["+923001234567"]}}
+# Data Structure
 STOCK = {"WhatsApp": {}, "Telegram": {}, "Facebook": {}}
-LOCKED_NUMBERS = {}  # Tracking: {number: {"user_id": id, "expire_at": timestamp, "service": s, "country": c}}
+DISABLED_COUNTRIES = {"WhatsApp": [], "Telegram": [], "Facebook": []}
+LOCKED_NUMBERS = {}  # {number: {"user_id": id, "expire_at": t, "service": s, "country": c}}
+ADMIN_STATES = {}    # Admin menu tracking ke liye
 
 SERVICE_ICONS = {
     "WhatsApp": "🟢 WhatsApp",
@@ -22,21 +25,20 @@ SERVICE_ICONS = {
     "Facebook": "🔵 Facebook"
 }
 
-# Helper: Clean Expired Numbers
+# 5 Minute ka Timeout Clock (Auto Release System)
 def clean_expired_locks():
     while True:
         current_time = time.time()
         expired = [num for num, data in LOCKED_NUMBERS.items() if current_time > data["expire_at"]]
         for num in expired:
             data = LOCKED_NUMBERS[num]
-            # Put back to stock
             if data["country"] not in STOCK[data["service"]]:
                 STOCK[data["service"]][data["country"]] = []
             STOCK[data["service"]][data["country"]].append(num)
             del LOCKED_NUMBERS[num]
         time.sleep(10)
 
-# --- TELEGRAM BOT LOGIC ---
+# --- CLIENT INTERFACE ---
 
 @bot.message_handler(commands=['start'])
 def start_handler(message):
@@ -57,11 +59,14 @@ def service_select(call):
     service = call.data.split("_")[1]
     countries = list(STOCK.get(service, {}).keys())
     
-    # Only show countries that have active numbers in stock
-    available_countries = [c for c in countries if len(STOCK[service][c]) > 0]
+    # Sirf woh countries dikhengi jo active hain aur jinme stock mojud hai
+    available_countries = [
+        c for c in countries 
+        if len(STOCK[service][c]) > 0 and c not in DISABLED_COUNTRIES[service]
+    ]
     
     if not available_countries:
-        bot.answer_callback_query(call.id, f"❌ Sorry, no numbers available for {service} right now.", show_alert=True)
+        bot.answer_callback_query(call.id, f"❌ Sorry, no active numbers available for {service} right now.", show_alert=True)
         return
         
     markup = InlineKeyboardMarkup()
@@ -79,14 +84,14 @@ def service_select(call):
 def get_number(call):
     _, service, country = call.data.split("_")
     
-    if country not in STOCK[service] or not STOCK[service][country]:
-        bot.answer_callback_query(call.id, "❌ Stock just ran out! Try another country.", show_alert=True)
+    if country in DISABLED_COUNTRIES[service] or country not in STOCK[service] or not STOCK[service][country]:
+        bot.answer_callback_query(call.id, "❌ This country is currently unavailable or out of stock.", show_alert=True)
         return
         
-    # Get 1 number and remove from available stock
+    # Stock se 1 number nikaalein
     assigned_number = STOCK[service][country].pop(0)
     
-    # Lock for 5 minutes (300 seconds)
+    # 5 minute (300 seconds) ke liye lock karein
     LOCKED_NUMBERS[assigned_number] = {
         "user_id": call.from_user.id,
         "expire_at": time.time() + 300,
@@ -95,52 +100,175 @@ def get_number(call):
     }
     
     msg_text = (
-        f"⚡ **KB4MAX SMS — Assigned Number**\n\n"
+        f"⚡ **KB4MAX SMS — Number Assigned**\n\n"
         f"📦 **Service:** {SERVICE_ICONS[service]}\n"
+        f"🌐 **Country:** `{country}`\n"
         f"📞 **Number:** `{assigned_number}`\n\n"
-        f"⏳ This number is reserved for you for **5 Minutes**.\n"
-        f"📢 Please request OTP now! Check our channel for updates."
+        f"⏳ Yeh number aapke liye **5 Minutes** ke liye reserved hai.\n"
+        f"📢 Kripya abhi code request karein aur neeche diye gaye button par click karke hamare OTP Channel mein jayein!"
     )
     
-    # Direct click to copy number structure
+    # Number copy aur seedhe channel par jaane ka button
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton(text=f"📋 Copy: {assigned_number}", callback_data=f"click_copy_{assigned_number}"))
-    markup.add(InlineKeyboardButton(text="📱 Go to OTP Channel ↗️", url="https://t.me/your_channel_username"))
+    markup.add(InlineKeyboardButton(text="📢 GET OTP (Go to Channel) ↗️", url=CHANNEL_LINK))
     
     bot.edit_message_text(text=msg_text, chat_id=call.message.chat.id, message_id=call.message.id, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("click_copy_"))
 def copy_alert(call):
-    bot.answer_callback_query(call.id, text="Number copied to clipboard successfully!", show_alert=False)
+    bot.answer_callback_query(call.id, text="Number copied successfully!", show_alert=False)
 
-# Admin Bulk Upload File Handler
-@bot.message_handler(content_types=['document'])
-def handle_stock_file(message):
-    if message.from_user.id != ADMIN_ID: return
+
+# --- FULL ADMIN CONTROL PANEL ---
+
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Access denied! You are not the admin.")
+        return
+        
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("📥 Add Bulk Stock", callback_data="adm_add_stock"))
+    markup.row(InlineKeyboardButton("🌍 Manage Countries (On/Off)", callback_data="adm_manage_countries"))
+    markup.row(InlineKeyboardButton("📊 Check Live Stock Status", callback_data="adm_check_status"))
+    markup.row(InlineKeyboardButton("🧹 Clear All Stock", callback_data="adm_clear_stock"))
+    
+    bot.send_message(message.chat.id, "🛠️ **KB4MAX SMS — MAIN ADMIN CONTROL PANEL**\n\nWelcome back, Boss. What do you want to manage today?", parse_mode="Markdown", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
+def admin_actions(call):
+    if call.from_user.id != ADMIN_ID: return
+    action = call.data.split("_")[1]
+    
+    if action == "add_stock":
+        markup = InlineKeyboardMarkup()
+        for srv in SERVICE_ICONS:
+            markup.add(InlineKeyboardButton(SERVICE_ICONS[srv], callback_data=f"asrv_{srv}"))
+        bot.edit_message_text("📥 Select the **Service** for which you want to upload stock:", chat_id=call.message.chat.id, message_id=call.message.id, reply_markup=markup)
+        
+    elif action == "manage_countries":
+        markup = InlineKeyboardMarkup()
+        for srv in SERVICE_ICONS:
+            markup.add(InlineKeyboardButton(f"Manage {srv}", callback_data=f"mctry_{srv}"))
+        bot.edit_message_text("🌍 Select the service to **Enable/Disable** its countries:", chat_id=call.message.chat.id, message_id=call.message.id, reply_markup=markup)
+        
+    elif action == "check_status":
+        status_text = "📊 **CURRENT LIVE STOCK STATUS:**\n\n"
+        for srv in STOCK:
+            status_text += f"🔹 **{srv}:**\n"
+            if not STOCK[srv]:
+                status_text += "  ↳ No countries added yet.\n"
+            for ctry in STOCK[srv]:
+                status = "🔴 DISABLED" if ctry in DISABLED_COUNTRIES[srv] else "🟢 ACTIVE"
+                status_text += f"  ↳ 📍 {ctry}: `{len(STOCK[srv][ctry])}` numbers [{status}]\n"
+        
+        status_text += f"\n⏳ **Currently Locked Numbers (Waiting OTP):** `{len(LOCKED_NUMBERS)}`"
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Back to Admin Panel", callback_data="adm_back"))
+        bot.edit_message_text(status_text, chat_id=call.message.chat.id, message_id=call.message.id, parse_mode="Markdown", reply_markup=markup)
+        
+    elif action == "clear_stock":
+        for srv in STOCK: STOCK[srv].clear()
+        LOCKED_NUMBERS.clear()
+        bot.answer_callback_query(call.id, "⚠️ Entire stock database has been wiped clean!", show_alert=True)
+        admin_panel(call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("asrv_"))
+def admin_stock_service(call):
+    srv = call.data.split("_")[1]
+    ADMIN_STATES[call.from_user.id] = {"action": "wait_country", "service": srv}
+    bot.edit_message_text(f"Selected: **{srv}**\n\n✍️ Please Type the **Country Name** (e.g., Pakistan, Algeria) in chat now:", chat_id=call.message.chat.id, message_id=call.message.id, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("mctry_"))
+def admin_toggle_countries_list(call):
+    srv = call.data.split("_")[1]
+    countries = list(STOCK[srv].keys())
+    
+    if not countries:
+        bot.answer_callback_query(call.id, "No countries found in this service stock.", show_alert=True)
+        return
+        
+    markup = InlineKeyboardMarkup()
+    for c in countries:
+        status_label = "❌ Off" if c in DISABLED_COUNTRIES[srv] else "✅ On"
+        markup.add(InlineKeyboardButton(f"{c} ({status_label})", callback_data=f"tgl_{srv}_{c}"))
+    markup.add(InlineKeyboardButton("⬅️ Back", callback_data="adm_back"))
+    
+    bot.edit_message_text(f"🌍 Toggle Countries for **{srv}**:\n*(Click a button to turn On/Off)*", chat_id=call.message.chat.id, message_id=call.message.id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("tgl_"))
+def admin_toggle_country_execute(call):
+    _, srv, ctry = call.data.split("_")
+    if ctry in DISABLED_COUNTRIES[srv]:
+        DISABLED_COUNTRIES[srv].remove(ctry)
+    else:
+        DISABLED_COUNTRIES[srv].append(ctry)
+    
+    admin_toggle_countries_list(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "adm_back")
+def back_to_admin(call):
+    bot.delete_message(call.message.chat.id, call.message.id)
+    admin_panel(call.message)
+
+# Admin Text Input Handler
+@bot.message_handler(func=lambda message: message.from_user.id == ADMIN_ID and message.from_user.id in ADMIN_STATES)
+def handle_admin_inputs(message):
+    state = ADMIN_STATES[message.from_user.id]
+    
+    if state["action"] == "wait_country":
+        country_name = message.text.strip()
+        ADMIN_STATES[message.from_user.id] = {"action": "wait_numbers", "service": state["service"], "country": country_name}
+        bot.reply_to(message, f"📍 Country Set to: **{country_name}**\n\n📥 Now send the **Numbers List**.\nFormat: Paste numbers here directly (one number per line) or upload a txt file.")
+        
+    elif state["action"] == "wait_numbers":
+        srv = state["service"]
+        ctry = state["country"]
+        
+        numbers = message.text.strip().splitlines()
+        if ctry not in STOCK[srv]:
+            STOCK[srv][ctry] = []
+            
+        added = 0
+        for num in numbers:
+            num = num.strip()
+            if num and num not in STOCK[srv][ctry]:
+                STOCK[srv][ctry].append(num)
+                added += 1
+                
+        del ADMIN_STATES[message.from_user.id]
+        bot.reply_to(message, f"✅ Done Boss! Successfully added `{added}` new numbers to **{srv} -> {ctry}**.")
+
+# Admin File Input Handler
+@bot.message_handler(content_types=['document'], func=lambda message: message.from_user.id == ADMIN_ID and message.from_user.id in ADMIN_STATES)
+def handle_admin_file_input(message):
+    state = ADMIN_STATES[message.from_user.id]
+    if state["action"] != "wait_numbers": return
+    
+    srv = state["service"]
+    ctry = state["country"]
     
     file_info = bot.get_file(message.document.file_id)
     downloaded_file = bot.download_file(file_info.file_path)
-    
-    # File content processing line by line
     lines = downloaded_file.decode("utf-8").splitlines()
-    count = 0
     
-    for line in lines:
-        if ',' in line:
-            try:
-                srv, cntry, num = [x.strip() for x in line.split(',')]
-                if srv in STOCK:
-                    if cntry not in STOCK[srv]:
-                        STOCK[srv][cntry] = []
-                    if num not in STOCK[srv][cntry]:
-                        STOCK[srv][cntry].append(num)
-                        count += 1
-            except:
-                continue
-                
-    bot.reply_to(message, f"✅ Successfully added {count} numbers to the stock system!")
+    if ctry not in STOCK[srv]:
+        STOCK[srv][ctry] = []
+        
+    added = 0
+    for num in lines:
+        num = num.strip()
+        if num and num not in STOCK[srv][ctry]:
+            STOCK[srv][ctry].append(num)
+            added += 1
+            
+    del ADMIN_STATES[message.from_user.id]
+    bot.reply_to(message, f"✅ File Processed! Successfully added `{added}` new numbers to **{srv} -> {ctry}**.")
 
-# --- FLASK WEBHOOK ROUTE FOR TAMPERMONKEY ---
+
+# --- FLASK WEBHOOK (TAMPERMONKEY SYNC ROUTE) ---
 
 @app.route('/webhook/otp', methods=['POST'])
 def incoming_otp():
@@ -153,7 +281,7 @@ def incoming_otp():
         lock_data = LOCKED_NUMBERS[num]
         service_title = SERVICE_ICONS.get(lock_data['service'], lock_data['service'])
         
-        # Exact Short Format Layout
+        # Short and clean layout
         channel_msg = (
             f"⚡ **KB4MAX SMS** ⭐️\n"
             f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
@@ -170,11 +298,11 @@ def incoming_otp():
         
         bot.send_message(CHANNEL_ID, channel_msg, parse_mode="Markdown", reply_markup=markup)
         
-        # Remove from active lock completely so it cannot be reused
+        # Number ko hamesha ke liye remove kar dein taaki reuse na ho
         del LOCKED_NUMBERS[num]
         return jsonify({"status": "success"}), 200
         
-    return jsonify({"status": "ignored", "reason": "Number not locked or expired"}), 200
+    return jsonify({"status": "ignored"}), 200
 
 def run_flask():
     app.run(host="0.0.0.0", port=5000)
@@ -182,5 +310,5 @@ def run_flask():
 if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     threading.Thread(target=clean_expired_locks, daemon=True).start()
-    print("Bot is polling...")
+    print("KB4MAX Premium Bot started...")
     bot.infinity_polling()
